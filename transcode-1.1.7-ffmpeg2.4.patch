@@ -1,0 +1,13 @@
+Index: transcode-1.1.7/import/probe_ffmpeg.c
+===================================================================
+--- transcode-1.1.7/import/probe_ffmpeg.c
++++ transcode-1.1.7/import/probe_ffmpeg.c	2014-11-18 10:37:57.865085186 +0100
+@@ -120,7 +120,7 @@
+ 
+     translate_info(lavf_dmx_context, ipipe->probe_info);
+ 
+-    av_close_input_file(lavf_dmx_context);
++    avformat_close_input(&lavf_dmx_context);
+     return;
+ }
+ 

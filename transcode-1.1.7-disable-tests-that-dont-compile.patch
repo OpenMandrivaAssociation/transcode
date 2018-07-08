@@ -1,0 +1,12 @@
+diff -up transcode-1.1.7/testsuite/Makefile.am.omv~ transcode-1.1.7/testsuite/Makefile.am
+--- transcode-1.1.7/testsuite/Makefile.am.omv~	2018-07-09 00:36:17.399486880 +0200
++++ transcode-1.1.7/testsuite/Makefile.am	2018-07-09 00:36:17.393486880 +0200
+@@ -19,8 +19,6 @@ PVM3_TEST = test-pvmparser
+ endif
+ 
+ noinst_PROGRAMS = \
+-	test-acmemcpy \
+-	test-acmemcpy-speed \
+ 	test-average \
+ 	test-bufalloc \
+ 	test-cfg-filelist \
