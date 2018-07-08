@@ -101,7 +101,8 @@ raw video/audio streams for import and to enable post-processing of AVI files.
 This package is in tainted as it could violate some patents.
 
 %prep
-%autosetup -p1
+%setup
+%apply_patches
 
 %build
 autoreconf -vfi
