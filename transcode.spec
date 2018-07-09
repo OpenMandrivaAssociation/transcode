@@ -82,6 +82,7 @@ BuildRequires:	pkgconfig(theora)
 %if %build_pvm
 BuildRequires:	libpvm-devel >= 3.4
 %endif
+BuildRequires:	atomic-devel
 #gw these are requirements of the plf version of libMagick-devel
 BuildRequires:	pkgconfig(jasper)
 BuildRequires:	jbig-devel
