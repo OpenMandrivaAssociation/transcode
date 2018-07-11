@@ -107,6 +107,8 @@ This package is in tainted as it could violate some patents.
 %build
 autoreconf -vfi
 %ifarch %ix86
+export CC=gcc
+export CXX=g++
 export CPPFLAGS="$CPPFLAGS -mmmx"
 %endif
 %configure \
