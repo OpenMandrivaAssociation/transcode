@@ -37,7 +37,6 @@ Patch8:		transcode-1.1.7-freetype.patch
 Patch9:		transcode-1.1.7-ffmpeg2.4.patch
 Patch10:	transcode-1.1.7-ffmpeg29.patch
 Patch11:	transcode-ffmpeg3.patch
-Patch12:	transcode-1.1.7-imagemagick7.patch
 Patch13:	transcode-1.1.7-ffmpeg4.patch
 Patch14:	transcode-1.1.7-disable-tests-that-dont-compile.patch
 
@@ -157,10 +156,10 @@ export CPPFLAGS="$CPPFLAGS -mmmx"
 	--enable-xvid \
 	--enable-x264
 
-%make_build
+%make
 
 %install
-%make_install transform=""
+%makeinstall_std transform=""
 
 for file in `find %{buildroot} -name "*.la"`; do
 	perl -pi -e 's|'%{buildroot}'/%{name}-%{version}/||g' $file
