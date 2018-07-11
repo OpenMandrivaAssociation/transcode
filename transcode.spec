@@ -22,7 +22,7 @@ Version:	1.1.7
 Release:	1
 Summary:	A linux video stream processing utility
 License: 	GPLv2+
-Group: 		Video/Editors and Converters
+Group: 		Video
 Url:		https://bitbucket.org/france/transcode-tcforge/
 Source0:	https://bitbucket.org/france/transcode-tcforge/downloads/%{name}-%{version}.tar.bz2
 Patch0:		transcode-1.1.7-ffmpeg.patch
