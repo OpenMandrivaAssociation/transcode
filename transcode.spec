@@ -15,6 +15,8 @@
 %define build_theora 1
 %define build_faac 0
 
+%define __noautoreq /usr/bin/gawk
+
 %global optflags %{optflags} -Ofast
 
 Name:		transcode
