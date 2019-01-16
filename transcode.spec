@@ -66,6 +66,7 @@ BuildRequires:	netpbm-devel
 BuildRequires:	pkgconfig(libv4l1)
 BuildRequires:	pkgconfig(x264)
 BuildRequires:	pkgconfig(mjpegtools)
+BuildRequires:	pkgconfig(libjpeg)
 BuildRequires:	pkgconfig(vorbis)
 BuildRequires:	pkgconfig(libxml-2.0)
 BuildRequires:	pkgconfig(xpm)
