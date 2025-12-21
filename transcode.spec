@@ -41,6 +41,11 @@ Patch12:	transcode-1.1.7-imagemagick7.patch
 Patch13:	transcode-1.1.7-ffmpeg4.patch
 Patch14:	transcode-1.1.7-disable-tests-that-dont-compile.patch
 
+BuildRequires:	autoconf
+BuildRequires:	automake
+BuildRequires:	libtool-base
+BuildRequires:	slibtool
+BuildRequires:	make
 BuildRequires:	pkgconfig(ImageMagick)
 BuildRequires:	pkgconfig(sdl)
 BuildRequires:	pkgconfig(x11)
