@@ -1,0 +1,192 @@
+--- a/libtc/tcavcodec.h	2026-08-14 19:26:38.876837662 +0200
++++ b/libtc/tcavcodec.h	2026-08-14 19:26:05.956910094 +0200
+@@ -32,6 +32,7 @@
+ #include <libavutil/avutil.h>
+ #include <libavcodec/avcodec.h>
+ #include <libavformat/avformat.h>
++#include "ffmpeg9compat.h"
+ 
+ /*************************************************************************/
+ 
+@@ -53,7 +54,7 @@
+ 
+ #define TC_INIT_LIBAVCODEC do { \
+     TC_LOCK_LIBAVCODEC; \
+-    avcodec_register_all(); \
++    /* avcodec_register_all() is a no-op since FFmpeg 4 */ \
+     TC_UNLOCK_LIBAVCODEC; \
+ } while (0)
+ 
+--- a/libtc/ffmpeg9compat.h	2026-08-12 00:22:09.765536733 +0200
++++ b/libtc/ffmpeg9compat.h	2026-08-14 19:26:05.927328179 +0200
+@@ -0,0 +1,69 @@
++#ifndef TRANSCODE_FFMPEG9COMPAT_H
++#define TRANSCODE_FFMPEG9COMPAT_H
++
++#include <string.h>
++#include <errno.h>
++#include <libavcodec/avcodec.h>
++#include <libavutil/imgutils.h>
++
++#ifndef AVPicture
++typedef AVFrame AVPicture;
++#endif
++
++#ifndef avcodec_register_all
++#define avcodec_register_all() ((void)0)
++#endif
++
++static inline void tc_av_init_packet(AVPacket *pkt)
++{
++	memset(pkt, 0, sizeof(*pkt));
++	pkt->pts = pkt->dts = AV_NOPTS_VALUE;
++}
++
++static inline int tc_avpicture_fill(AVFrame *pic, uint8_t *ptr, int fmt, int w, int h)
++{
++	return av_image_fill_arrays(pic->data, pic->linesize, ptr, (enum AVPixelFormat)fmt, w, h, 1);
++}
++
++static inline int tc_encode_video2(AVCodecContext *avctx, AVPacket *pkt,
++				   const AVFrame *frame, int *got)
++{
++	int ret = avcodec_send_frame(avctx, frame);
++	*got = 0;
++	if (ret < 0 && ret != AVERROR_EOF)
++		return ret;
++	ret = avcodec_receive_packet(avctx, pkt);
++	if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
++		return 0;
++	if (ret < 0)
++		return ret;
++	*got = 1;
++	return 0;
++}
++
++static inline int tc_decode_video2(AVCodecContext *avctx, AVFrame *frame,
++				   int *got, AVPacket *pkt)
++{
++	int ret;
++	*got = 0;
++	ret = avcodec_send_packet(avctx, pkt);
++	if (ret < 0 && ret != AVERROR(EAGAIN) && ret != AVERROR_EOF)
++		return ret;
++	ret = avcodec_receive_frame(avctx, frame);
++	if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF)
++		return 0;
++	if (ret < 0)
++		return ret;
++	*got = 1;
++	return pkt ? pkt->size : 0;
++}
++
++#define av_init_packet(p) tc_av_init_packet(p)
++#define avpicture_fill(pic, ptr, fmt, w, h) tc_avpicture_fill((AVFrame *)(pic), ptr, fmt, w, h)
++#define avcodec_encode_video2(c, p, f, g) tc_encode_video2((c), (p), (f), (g))
++#define avcodec_decode_video2(c, f, g, p) tc_decode_video2((c), (f), (g), (p))
++#define avcodec_close(c) ((void)(c), 0)
++#define avcodec_get_context_defaults(c) memset((c), 0, sizeof(*(c)))
++#define avcodec_get_context_defaults3(c, codec) memset((c), 0, sizeof(*(c)))
++
++#endif
+--- a/encode/encode_lavc.c	2026-08-14 19:26:38.894319160 +0200
++++ b/encode/encode_lavc.c	2026-08-14 19:26:38.553301172 +0200
+@@ -989,7 +989,9 @@
+     pd->ff_vcontext.max_b_frames            = 0;
+     pd->ff_vcontext.me_range                = 0;
+     pd->ff_vcontext.mb_decision             = 0;
++#if LIBAVCODEC_VERSION_MAJOR < 59
+     pd->ff_vcontext.scenechange_threshold   = 0;
++#endif
+     pd->confdata.scenechange_factor         = 1;
+     pd->ff_vcontext.b_frame_strategy        = 0;
+     pd->ff_vcontext.b_sensitivity           = 40;
+@@ -1024,10 +1026,14 @@
+     pd->ff_vcontext.dia_size                = 0;
+     pd->ff_vcontext.mv0_threshold           = 256;
+     pd->ff_vcontext.last_predictor_count    = 0;
++#if LIBAVCODEC_VERSION_MAJOR < 59
+     pd->ff_vcontext.pre_me                  = 1;
++#endif
+     pd->ff_vcontext.me_subpel_quality       = 8;
+     pd->ff_vcontext.refs                    = 1;
++#if LIBAVCODEC_VERSION_MAJOR < 59
+     pd->ff_vcontext.noise_reduction         = 0;
++#endif
+     pd->confdata.quantizer_noise_shaping = 0;
+     pd->ff_vcontext.flags                   = 0;
+ }
+@@ -1077,9 +1083,11 @@
+         pd->ff_vcontext.rtp_mode = 1;
+     }
+ #endif
++#if LIBAVCODEC_VERSION_MAJOR < 59
+     if (pd->confdata.flags.closedgop) {
+         pd->ff_vcontext.scenechange_threshold = 1000000;
+     }
++#endif
+     if (pd->interlacing.active) {
+         /* enforce interlacing */
+         pd->ff_vcontext.flags |= AV_CODEC_FLAG_INTERLACED_DCT;
+@@ -1555,8 +1563,10 @@
+         return tc_lavc_flush_video(self, outframe); // FIXME
+     }
+ 
+-    pd->ff_venc_frame.interlaced_frame = pd->interlacing.active;
+-    pd->ff_venc_frame.top_field_first  = pd->interlacing.top_first;
++    if (pd->interlacing.active)
++        pd->ff_venc_frame.flags |= AV_FRAME_FLAG_INTERLACED;
++    if (pd->interlacing.top_first)
++        pd->ff_venc_frame.flags |= AV_FRAME_FLAG_TOP_FIELD_FIRST;
+ 
+     pd->pre_encode_video(pd, inframe); 
+ 
+@@ -1576,7 +1586,7 @@
+         return TC_ERROR;
+     }
+     
+-    if (pd->ff_vcontext.coded_frame->key_frame) {
++    if (pkt.flags & AV_PKT_FLAG_KEY) {
+         outframe->attributes |= TC_FRAME_IS_KEYFRAME;
+     }
+ 
+--- a/import/probe_ffmpeg.c	2026-08-14 19:26:38.910409642 +0200
++++ b/import/probe_ffmpeg.c	2026-08-14 19:26:22.901773991 +0200
+@@ -47,15 +47,15 @@
+     for (i = 0; i < ctx->nb_streams; i++) {
+         st = ctx->streams[i];
+ 
+-        if (st->codec->codec_type == AVMEDIA_TYPE_VIDEO) {
+-            info->bitrate = st->codec->bit_rate / 1000;
+-            info->width = st->codec->width;
+-            info->height = st->codec->height;
++        if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
++            info->bitrate = st->codecpar->bit_rate / 1000;
++            info->width = st->codecpar->width;
++            info->height = st->codecpar->height;
+             if (st->avg_frame_rate.num > 0 && st->avg_frame_rate.den > 0) {
+                 info->fps = av_q2d(st->avg_frame_rate);
+             } else {
+                 /* watch out here */
+-                info->fps = 1.0/av_q2d(st->codec->time_base);
++                info->fps = 1.0/av_q2d(st->time_base);
+             }
+             tc_frc_code_from_value(&info->frc, info->fps);
+             break;
+@@ -65,12 +65,12 @@
+     for (i = 0; i < ctx->nb_streams; i++) {
+         st = ctx->streams[i];
+ 
+-        if (st->codec->codec_type == AVMEDIA_TYPE_AUDIO
++        if (st->codecpar->codec_type == AVMEDIA_TYPE_AUDIO
+          && j < TC_MAX_AUD_TRACKS) {
+             info->track[j].format = 0x1; /* known wrong */
+-            info->track[j].chan = st->codec->channels;
+-            info->track[j].samplerate = st->codec->sample_rate;
+-            info->track[j].bitrate = st->codec->bit_rate / 1000;
++            info->track[j].chan = st->codecpar->ch_layout.nb_channels;
++            info->track[j].samplerate = st->codecpar->sample_rate;
++            info->track[j].bitrate = st->codecpar->bit_rate / 1000;
+             /* XXX: known wrong for PCM */
+ 
+             info->track[j].bits = BITS;

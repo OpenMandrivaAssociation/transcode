@@ -19,7 +19,7 @@
 
 Name:		transcode
 Version:	1.1.7
-Release:	2
+Release:	3
 Summary:	A linux video stream processing utility
 License: 	GPLv2+
 Group: 		Video/Editors and Converters
@@ -40,6 +40,7 @@ Patch11:	transcode-ffmpeg3.patch
 Patch12:	transcode-1.1.7-imagemagick7.patch
 Patch13:	transcode-1.1.7-ffmpeg4.patch
 Patch14:	transcode-1.1.7-disable-tests-that-dont-compile.patch
+Patch15:	transcode-1.1.7-ffmpeg9.patch
 
 BuildRequires:	autoconf
 BuildRequires:	automake
