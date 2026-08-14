@@ -1,0 +1,74 @@
+Do not force -L/usr/lib (breaks 64-bit link tests on multilib) and keep
+pkg-config -D flags when probing headers (ImageMagick 7).
+
+--- transcode-1.1.7/configure.in	2026-08-14 23:26:25.975039745 +0200
++++ transcode-1.1.7/configure.in	2026-08-14 23:26:25.981206918 +0200
+@@ -8,7 +8,7 @@
+ AC_CANONICAL_SYSTEM
+ 
+ AM_INIT_AUTOMAKE(transcode,1.1.7)
+-AM_CONFIG_HEADER(config.h)
++AC_CONFIG_HEADERS(config.h)
+ 
+ AM_MAINTAINER_MODE
+ 
+@@ -901,7 +901,7 @@
+ dnl
+ LIBDVDREAD_EXTRA_LIBS="$LIBDVDREAD_EXTRA_LIBS -lm"
+ TC_PKG_CHECK(libdvdread, yes, LIBDVDREAD, no, none, dvdread, DVDOpen,
+- libdvdread, [http://www.dtek.chalmers.se/groups/dvd/downloads.shtml])
++ dvdread, [http://www.dtek.chalmers.se/groups/dvd/downloads.shtml])
+ if test x"$have_libdvdread" = x"yes" ; then
+   libdvdread_inc="no"
+   save_CPPFLAGS="$CPPFLAGS"
+@@ -987,7 +987,7 @@
+ dnl
+ dnl LZO
+ dnl
+-TC_PKG_CHECK(lzo, no, LZO, no, [lzo/lzo1x.h], lzo2, lzo_version, lzo,
++TC_PKG_CHECK(lzo, no, LZO, no, [lzo/lzo1x.h], lzo2, lzo_version, lzo2,
+  [http://www.oberhumer.com/opensource/lzo/])
+ TC_PKG_HAVE(lzo, LZO)
+ 
+@@ -1125,7 +1125,7 @@
+   jpeg_CreateCompress, jpeg-mmx, [http://sourceforge.net/projects/mjpeg/])
+ if test x"$have_libjpegmmx" = x"no" ; then
+   TC_PKG_CHECK(libjpeg, yes, LIBJPEG, no, jpeglib.h, jpeg,
+-    jpeg_CreateCompress, jpeg, [ftp://ftp.uu.net/graphics/jpeg/])
++    jpeg_CreateCompress, libjpeg, [ftp://ftp.uu.net/graphics/jpeg/])
+ else
+   have_libjpeg="yes"
+   LIBJPEG_CFLAGS="$LIBJPEGMMX_CFLAGS"
+
+--- transcode-1.1.7/acinclude.m4	2026-08-14 23:26:25.976036227 +0200
++++ transcode-1.1.7/acinclude.m4	2026-08-14 23:26:26.001772939 +0200
+@@ -555,7 +555,7 @@
+           $1_ii="-I$w_$1_p/include"
+           AC_MSG_RESULT(prefix)
+         else
+-          $1_ii="-I/usr/include"
++          $1_ii=""
+           AC_MSG_RESULT(default)
+         fi
+       fi
+@@ -575,9 +575,9 @@
+ 
+   if test x"$5" != x"none" ; then
+     save_CPPFLAGS="$CPPFLAGS"
+-    CPPFLAGS="$CPPFLAGS $$1_ii"
++    CPPFLAGS="$CPPFLAGS $$1_ii $$3_EXTRA_CFLAGS"
+     AC_CHECK_HEADER([$5],
+-      [$3_CFLAGS="$$1_ii"],
++      [$3_CFLAGS="$$1_ii $$3_EXTRA_CFLAGS"],
+       [TC_PKG_ERROR($1, $5, $2, $8, $9, [cannot compile $5])])
+     CPPFLAGS="$save_CPPFLAGS"
+   elif test x"$pkg_config_$1" != x"no" ; then
+@@ -603,7 +603,7 @@
+           $1_ll="-L$w_$1_p${deflib}"
+           AC_MSG_RESULT(prefix)
+         else
+-          $1_ll="-L/usr${deflib}"
++          $1_ll=""
+           AC_MSG_RESULT(default)
+         fi
+       fi

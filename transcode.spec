@@ -15,7 +15,7 @@
 %define build_theora 1
 %define build_faac 0
 
-%global optflags %{optflags} -Ofast
+%global optflags %{optflags} -Ofast -std=gnu17 -fcommon
 
 Name:		transcode
 Version:	1.1.7
@@ -41,10 +41,10 @@ Patch12:	transcode-1.1.7-imagemagick7.patch
 Patch13:	transcode-1.1.7-ffmpeg4.patch
 Patch14:	transcode-1.1.7-disable-tests-that-dont-compile.patch
 Patch15:	transcode-1.1.7-ffmpeg9.patch
+Patch16:	transcode-1.1.7-configure-lib64.patch
+Patch17:	transcode-1.1.7-ffmpeg9-export.patch
 
 BuildRequires:	autoconf
-BuildRequires:	automake
-BuildRequires:	libtool-base
 BuildRequires:	slibtool
 BuildRequires:	make
 BuildRequires:	pkgconfig(ImageMagick)
@@ -57,6 +57,7 @@ BuildRequires:	pkgconfig(xv)
 BuildRequires:	pkgconfig(xpm)
 BuildRequires:	pkgconfig(alsa)
 BuildRequires:	ffmpeg-devel >= 0.4.9
+BuildRequires:	pkgconfig(libswresample)
 %if %build_dv
 BuildRequires:	pkgconfig(libdv) >= 0.99
 %endif
@@ -112,10 +113,20 @@ This package is in tainted as it could violate some patents.
 %autosetup -p1
 
 %build
-autoreconf -vfi
+%define _disable_ld_no_undefined 1
+# Do not run GNU libtoolize/autoreconf -i. libtool 2.5.4 emits a
+# multi-line $SED nm-parser that %%configure then splits, which
+# breaks AC_CHECK_LIB (iconv, xvid, dvdread, ...). Recreate configure
+# from configure.in using the tarball's bundled libtool macros.
+autoconf -f
+# Makefile.am change is not regenerated; drop the two tests that
+# no longer compile from the shipped Makefile.in.
+sed -i 's/test-acmemcpy$(EXEEXT) test-acmemcpy-speed$(EXEEXT) //' testsuite/Makefile.in
 %ifarch %ix86
 export CPPFLAGS="$CPPFLAGS -mmmx"
 %endif
+# glibc strlcpy/strlcat are hidden when sources set _ISOC99_SOURCE.
+export CPPFLAGS="$CPPFLAGS -D_GNU_SOURCE"
 %configure \
 	--enable-libmpeg2 \
 	--enable-libmpeg2convert \
@@ -150,7 +161,7 @@ export CPPFLAGS="$CPPFLAGS -mmmx"
 	--enable-libfame \
 	--enable-oss \
 	--enable-alsa \
-	--enable-libpostproc \
+	--disable-libpostproc \
 %if %{build_faac}
 	--enable-faac \
 %endif

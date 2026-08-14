@@ -1,0 +1,615 @@
+--- a/libtc/ffmpeg9compat.h	2026-08-14 23:29:35.287209957 +0200
++++ b/libtc/ffmpeg9compat.h	2026-08-14 23:28:39.453318886 +0200
+@@ -5,6 +5,8 @@
+ #include <errno.h>
+ #include <libavcodec/avcodec.h>
+ #include <libavutil/imgutils.h>
++#include <libavutil/channel_layout.h>
++#include <libavutil/samplefmt.h>
+ 
+ #ifndef AVPicture
+ typedef AVFrame AVPicture;
+@@ -14,6 +16,16 @@
+ #define avcodec_register_all() ((void)0)
+ #endif
+ 
++#ifndef FF_PRED_LEFT
++#define FF_PRED_LEFT 0
++#endif
++#ifndef AV_CODEC_FLAG_TRUNCATED
++#define AV_CODEC_FLAG_TRUNCATED 0
++#endif
++#ifndef avpicture_get_size
++#define avpicture_get_size(fmt, w, h) av_image_get_buffer_size((enum AVPixelFormat)(fmt), (w), (h), 1)
++#endif
++
+ static inline void tc_av_init_packet(AVPacket *pkt)
+ {
+ 	memset(pkt, 0, sizeof(*pkt));
+@@ -58,10 +70,52 @@
+ 	return pkt ? pkt->size : 0;
+ }
+ 
++static inline int tc_encode_audio(AVCodecContext *avctx, uint8_t *buf, int buf_size, const short *samples)
++{
++	AVFrame *frame;
++	AVPacket pkt;
++	int ret, got = 0;
++	int nb_ch, bps, nbytes;
++
++	tc_av_init_packet(&pkt);
++	pkt.data = buf;
++	pkt.size = buf_size;
++
++	frame = av_frame_alloc();
++	if (!frame)
++		return AVERROR(ENOMEM);
++	nb_ch = avctx->ch_layout.nb_channels;
++	if (nb_ch <= 0)
++		nb_ch = 2;
++	bps = av_get_bytes_per_sample(avctx->sample_fmt);
++	if (bps <= 0)
++		bps = 2;
++	frame->nb_samples = avctx->frame_size;
++	frame->format = avctx->sample_fmt;
++	frame->ch_layout = avctx->ch_layout;
++	nbytes = avctx->frame_size * nb_ch * bps;
++	ret = avcodec_fill_audio_frame(frame, nb_ch, avctx->sample_fmt,
++				       (const uint8_t *)samples, nbytes, 1);
++	if (ret < 0) {
++		av_frame_free(&frame);
++		return ret;
++	}
++	ret = tc_encode_video2(avctx, &pkt, frame, &got);
++	av_frame_free(&frame);
++	if (ret < 0)
++		return ret;
++	if (!got)
++		return 0;
++	if (pkt.data && pkt.data != buf && pkt.size > 0 && pkt.size <= buf_size)
++		memcpy(buf, pkt.data, pkt.size);
++	return pkt.size;
++}
++
+ #define av_init_packet(p) tc_av_init_packet(p)
+ #define avpicture_fill(pic, ptr, fmt, w, h) tc_avpicture_fill((AVFrame *)(pic), ptr, fmt, w, h)
+ #define avcodec_encode_video2(c, p, f, g) tc_encode_video2((c), (p), (f), (g))
+ #define avcodec_decode_video2(c, f, g, p) tc_decode_video2((c), (f), (g), (p))
++#define avcodec_encode_audio(c, buf, sz, samples) tc_encode_audio((c), (buf), (sz), (samples))
+ #define avcodec_close(c) ((void)(c), 0)
+ #define avcodec_get_context_defaults(c) memset((c), 0, sizeof(*(c)))
+ #define avcodec_get_context_defaults3(c, codec) memset((c), 0, sizeof(*(c)))
+--- a/encode/encode_lavc.c	2026-08-14 23:29:35.287322968 +0200
++++ b/encode/encode_lavc.c	2026-08-14 23:29:15.827873776 +0200
+@@ -34,6 +34,7 @@
+ 
+ #include "libtc/tcavcodec.h"
+ 
++#include <inttypes.h>
+ #include <math.h>
+ 
+ #define MOD_NAME    "encode_lavc.so"
+@@ -503,7 +504,9 @@
+     return TC_OK;
+ }
+ 
++#if LIBAVCODEC_VERSION_MAJOR < 59
+ #define PFRAME(PD) ((PD)->ff_vcontext.coded_frame)
++#endif
+ 
+ /*
+  * psnr_write:
+@@ -520,8 +523,9 @@
+ static void psnr_write(TCLavcPrivateData *pd, int size)
+ {
+     if (pd->psnr_file != NULL) {
+-        const char pict_type[5] = { '?', 'I', 'P', 'B', 'S' };
+         double f = pd->ff_vcontext.width * pd->ff_vcontext.height * 255.0 * 255.0;
++#if LIBAVCODEC_VERSION_MAJOR < 59
++        const char pict_type[5] = { '?', 'I', 'P', 'B', 'S' };
+         double err[3] = {
+                 PFRAME(pd)->error[0],
+                 PFRAME(pd)->error[1],
+@@ -536,6 +540,17 @@
+                 psnr(err[2] * 4 / f), /* FIXME */
+                 psnr((err[0] + err[1] + err[2]) / (f * 1.5)),
+                 pict_type[PFRAME(pd)->pict_type]);
++#else
++        fprintf(pd->psnr_file, "%6"PRId64", %2d, %6d, %2.2f,"
++                               " %2.2f, %2.2f, %2.2f %c\n",
++                pd->ff_vcontext.frame_num, 0, size,
++                psnr(pd->ff_vcontext.error[0]     / f),
++                psnr(pd->ff_vcontext.error[1] * 4 / f),
++                psnr(pd->ff_vcontext.error[2] * 4 / f),
++                psnr((pd->ff_vcontext.error[0] + pd->ff_vcontext.error[1]
++                      + pd->ff_vcontext.error[2]) / (f * 1.5)),
++                '?');
++#endif
+     }
+ }
+ 
+@@ -576,7 +591,11 @@
+ {
+     double f = pd->ff_vcontext.width * pd->ff_vcontext.height * 255.0 * 255.0;
+ 
++#if LIBAVCODEC_VERSION_MAJOR < 59
+     f *= pd->ff_vcontext.coded_frame->coded_picture_number;
++#else
++    f *= pd->ff_vcontext.frame_num > 0 ? pd->ff_vcontext.frame_num : 1;
++#endif
+ 
+ #define ERROR pd->ff_vcontext.error
+     tc_log_info(MOD_NAME, "PSNR: Y:%2.2f, Cb:%2.2f, Cr:%2.2f, All:%2.2f",
+@@ -991,11 +1010,11 @@
+     pd->ff_vcontext.mb_decision             = 0;
+ #if LIBAVCODEC_VERSION_MAJOR < 59
+     pd->ff_vcontext.scenechange_threshold   = 0;
+-#endif
+-    pd->confdata.scenechange_factor         = 1;
+     pd->ff_vcontext.b_frame_strategy        = 0;
+     pd->ff_vcontext.b_sensitivity           = 40;
+     pd->ff_vcontext.brd_scale               = 0;
++#endif
++    pd->confdata.scenechange_factor         = 1;
+     pd->ff_vcontext.bidir_refine            = 0;
+     pd->confdata.rc_strategy                = 2;
+     pd->ff_vcontext.b_quant_factor          = 1.25;
+@@ -1004,7 +1023,9 @@
+     pd->ff_vcontext.i_quant_offset          = 0.0;
+     pd->ff_vcontext.qblur                   = 0.5;
+     pd->ff_vcontext.qcompress               = 0.5;
++#if LIBAVCODEC_VERSION_MAJOR < 59
+     pd->ff_vcontext.mpeg_quant              = 0;
++#endif
+     pd->confdata.rc_initial_cplx            = 0.0;
+     pd->confdata.rc_qsquish              = 1.0;
+     pd->confdata.luma_elim_threshold     = 0;
+@@ -1192,11 +1213,15 @@
+         { "vme", PAUX(me_method), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 0, 16, },
+         { "me_range", PCTX(me_range), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 0, 16000 },
+         { "mbd", PCTX(mb_decision), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 0, 3 },
++#if LIBAVCODEC_VERSION_MAJOR < 59
+         { "sc_threshold", PCTX(scenechange_threshold), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, -1000000, 1000000 },
++#endif
+         { "sc_factor", PAUX(scenechange_factor), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 1, 16 },
++#if LIBAVCODEC_VERSION_MAJOR < 59
+         { "vb_strategy", PCTX(b_frame_strategy), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 0, 10 },
+         { "b_sensitivity", PCTX(b_sensitivity), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 1, 100 },
+         { "brd_scale", PCTX(brd_scale), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 0, 10 },
++#endif
+         { "bidir_refine", PCTX(bidir_refine), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 0, 4 },
+         //  { "aspect",     },
+         //  handled by transcode core
+@@ -1211,7 +1236,9 @@
+         { "vi_qoffset", PCTX(i_quant_offset), TCCONF_TYPE_FLOAT, TCCONF_FLAG_RANGE, 0.0, 31.0 },
+         { "vqblur", PCTX(qblur), TCCONF_TYPE_FLOAT, TCCONF_FLAG_RANGE, 0.0, 1.0 },
+         { "vqcomp", PCTX(qcompress), TCCONF_TYPE_FLOAT, TCCONF_FLAG_RANGE, 0.0, 1.0 },
++#if LIBAVCODEC_VERSION_MAJOR < 59
+         { "mpeg_quant", PCTX(mpeg_quant), TCCONF_TYPE_FLAG, 0, 0, 1 },
++#endif
+         //  { "vrc_eq",     }, // not yet supported
+         { "vrc_override", rc_override_buf, TCCONF_TYPE_STRING, 0, 0, 0 },
+         { "vrc_init_cplx", PAUX(rc_initial_cplx), TCCONF_TYPE_FLOAT, TCCONF_FLAG_RANGE, 0.0, 9999999.0 },
+@@ -1220,7 +1247,9 @@
+         { "vlelim", PAUX(luma_elim_threshold), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, -99, 99 },
+         { "vcelim", PAUX(chroma_elim_threshold), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, -99, 99 },
+         { "vstrict", PCTX(strict_std_compliance), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, -99, 99 },
++#if LIBAVCODEC_VERSION_MAJOR < 59
+         { "vpsize", PCTX(rtp_payload_size), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 0, 100000000 },
++#endif
+         { "dct", PCTX(dct_algo), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 0, 10 },
+         { "idct", PCTX(idct_algo), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 0, 20 },
+         { "lumi_mask", PCTX(lumi_masking), TCCONF_TYPE_FLOAT, TCCONF_FLAG_RANGE, 0.0, 1.0 },
+@@ -1229,7 +1258,9 @@
+         { "scplx_mask", PCTX(spatial_cplx_masking), TCCONF_TYPE_FLOAT, TCCONF_FLAG_RANGE, 0.0, 1.0 },
+         { "p_mask", PCTX(p_masking), TCCONF_TYPE_FLOAT, TCCONF_FLAG_RANGE, 0.0, 1.0 },
+         { "border_mask", PAUX(border_masking), TCCONF_TYPE_FLOAT, TCCONF_FLAG_RANGE, 0.0, 1.0 },
++#if LIBAVCODEC_VERSION_MAJOR < 59
+         { "pred", PCTX(prediction_method), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 0, 4 },
++#endif
+         { "precmp", PCTX(me_pre_cmp), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 0, 2000 },
+         { "cmp", PCTX(me_cmp), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 0, 2000 },
+         { "subcmp", PCTX(me_sub_cmp), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 0, 2000 },
+@@ -1238,12 +1269,16 @@
+         { "dia", PCTX(dia_size), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, -2000, 2000 },
+         { "mv0_threshold", PCTX(mv0_threshold), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 0, 1000 },
+         { "last_pred", PCTX(last_predictor_count), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 0, 2000 },
++#if LIBAVCODEC_VERSION_MAJOR < 59
+         { "pre_me", PCTX(pre_me), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 0, 2000},
++#endif
+         { "subq", PCTX(me_subpel_quality), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 0, 8 },
+         { "refs", PCTX(refs), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 1, 8 },
+         { "ibias", PAUX(intra_quant_bias), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, -512, 512 },
+         { "pbias", PAUX(inter_quant_bias), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, -512, 512 },
++#if LIBAVCODEC_VERSION_MAJOR < 59
+         { "nr", PCTX(noise_reduction), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 0, 1000000},
++#endif
+         { "qns", PAUX(quantizer_noise_shaping), TCCONF_TYPE_INT, TCCONF_FLAG_RANGE, 0, 3 },
+         { "inter_matrix_file", inter_matrix_file, TCCONF_TYPE_STRING, 0, 0, 0 },
+         { "intra_matrix_file", intra_matrix_file, TCCONF_TYPE_STRING, 0, 0, 0 },
+--- a/export/export_ffmpeg.c	2026-08-14 23:29:35.284645156 +0200
++++ b/export/export_ffmpeg.c	2026-08-14 23:29:50.755684404 +0200
+@@ -32,6 +32,7 @@
+ #include "aclib/imgconvert.h"
+ 
+ #include <ctype.h>
++#include <inttypes.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <assert.h>
+@@ -836,7 +837,9 @@
+     lavc_venc_context->qblur              = lavc_param_vqblur;
+     lavc_venc_context->max_b_frames       = lavc_param_vmax_b_frames;
+     lavc_venc_context->b_quant_factor     = lavc_param_vb_qfactor;
++#if LIBAVCODEC_VERSION_MAJOR < 59
+     lavc_venc_context->b_frame_strategy   = lavc_param_vb_strategy;
++#endif
+     lavc_venc_context->b_quant_offset     = lavc_param_vb_qoffset;
+ 
+     char buf[1024];
+@@ -860,11 +863,13 @@
+     set_dict_opt(lavc_param_pbias, "pbias");
+     set_dict_float_opt(lavc_param_rc_buffer_aggressivity, "rc_buf_aggressivity");
+     set_dict_float_opt(lavc_param_rc_initial_cplx, "rc_init_cplx");
++#if LIBAVCODEC_VERSION_MAJOR < 59
+     lavc_venc_context->rtp_payload_size   = lavc_param_packet_size;
+ #if LIBAVCODEC_VERSION_INT < ((52<<16)+(0<<8)+0)   
+     if (lavc_param_packet_size)
+         lavc_venc_context->rtp_mode       = 1;
+-#endif        
++#endif
++#endif
+     lavc_venc_context->strict_std_compliance= lavc_param_strict;
+     lavc_venc_context->i_quant_factor     = lavc_param_vi_qfactor;
+     lavc_venc_context->i_quant_offset     = lavc_param_vi_qoffset;
+@@ -873,15 +878,19 @@
+     lavc_venc_context->rc_buffer_size     = lavc_param_rc_buffer_size * 1024;
+     lavc_venc_context->debug              = lavc_param_debug;
+     lavc_venc_context->last_predictor_count= lavc_param_last_pred;
++#if LIBAVCODEC_VERSION_MAJOR < 59
+     lavc_venc_context->pre_me             = lavc_param_pre_me;
++#endif
+     lavc_venc_context->me_pre_cmp         = lavc_param_me_pre_cmp;
+     lavc_venc_context->pre_dia_size       = lavc_param_pre_dia_size;
+     lavc_venc_context->me_subpel_quality  = lavc_param_me_subpel_quality;
+     lavc_venc_context->me_range           = lavc_param_me_range;
++#if LIBAVCODEC_VERSION_MAJOR < 59
+     lavc_venc_context->coder_type         = lavc_param_coder;
+     lavc_venc_context->context_model      = lavc_param_context;
+     lavc_venc_context->scenechange_threshold= lavc_param_sc_threshold;
+     lavc_venc_context->noise_reduction    = lavc_param_noise_reduction;
++#endif
+     set_dict_opt(lavc_param_inter_threshold, "inter_threshold");
+     lavc_venc_context->intra_dc_precision = lavc_param_intra_dc_precision;
+     lavc_venc_context->skip_top           = lavc_param_skip_top;
+@@ -974,7 +983,9 @@
+             p++;
+     }
+     lavc_venc_context->rc_override_count     = i;
++#if LIBAVCODEC_VERSION_MAJOR < 59
+     lavc_venc_context->mpeg_quant            = lavc_param_mpeg_quant;
++#endif
+     lavc_venc_context->dct_algo              = lavc_param_fdct;
+     lavc_venc_context->idct_algo             = lavc_param_idct;
+     lavc_venc_context->lumi_masking          = lavc_param_lumi_masking;
+@@ -1118,7 +1129,9 @@
+     lavc_venc_context->flags |= lavc_param_psnr;
+     do_psnr = lavc_param_psnr;
+ 
++#if LIBAVCODEC_VERSION_MAJOR < 59
+     lavc_venc_context->prediction_method = lavc_param_prediction_method;
++#endif
+ 
+     if(is_huffyuv)
+         lavc_venc_context->pix_fmt = AV_PIX_FMT_YUV422P;
+@@ -1612,8 +1625,10 @@
+     if (encoded_frames && frames > encoded_frames)
+     return TC_EXPORT_ERROR;
+ 
+-    lavc_venc_frame->interlaced_frame = interlacing_active;
+-    lavc_venc_frame->top_field_first = interlacing_top_first;
++    if (interlacing_active)
++        lavc_venc_frame->flags |= AV_FRAME_FLAG_INTERLACED;
++    if (interlacing_top_first)
++        lavc_venc_frame->flags |= AV_FRAME_FLAG_TOP_FIELD_FIRST;
+ 
+     switch (pix_fmt)
+     {
+@@ -1706,10 +1721,10 @@
+     if (!is_mpegvideo) {
+       if((uint32_t)(AVI_bytes_written(avifile)+out_size+16+8)>>20 >= tc_avi_limit) tc_outstream_rotate_request();
+ 
+-      if (lavc_venc_context->coded_frame->key_frame) tc_outstream_rotate();
++      if (pkt.flags & AV_PKT_FLAG_KEY) tc_outstream_rotate();
+ 
+       if (AVI_write_frame(avifile, enc_buffer, out_size,
+-                       lavc_venc_context->coded_frame->key_frame? 1 : 0) < 0) {
++                       (pkt.flags & AV_PKT_FLAG_KEY) ? 1 : 0) < 0) {
+     AVI_print_error("avi video write error");
+ 
+     return TC_EXPORT_ERROR;
+@@ -1743,15 +1758,15 @@
+             }
+         }
+ 
+-        fprintf(fvstats, "%6d, %2d, %6d, %2.2f, %2.2f, %2.2f, %2.2f %c\n",
+-            lavc_venc_context->coded_frame->coded_picture_number,
+-            lavc_venc_context->coded_frame->quality,
++        fprintf(fvstats, "%6"PRId64", %2d, %6d, %2.2f, %2.2f, %2.2f, %2.2f %c\n",
++            lavc_venc_context->frame_num,
++            0,
+             out_size,
+-            psnr(lavc_venc_context->coded_frame->error[0]/f),
+-            psnr(lavc_venc_context->coded_frame->error[1]*4/f),
+-            psnr(lavc_venc_context->coded_frame->error[2]*4/f),
+-            psnr((lavc_venc_context->coded_frame->error[0]+lavc_venc_context->coded_frame->error[1]+lavc_venc_context->coded_frame->error[2])/(f*1.5)),
+-            pict_type_char[lavc_venc_context->coded_frame->pict_type]
++            psnr(lavc_venc_context->error[0]/f),
++            psnr(lavc_venc_context->error[1]*4/f),
++            psnr(lavc_venc_context->error[2]*4/f),
++            psnr((lavc_venc_context->error[0]+lavc_venc_context->error[1]+lavc_venc_context->error[2])/(f*1.5)),
++            '?'
+             );
+     }
+ 
+@@ -1791,7 +1806,7 @@
+     if(do_psnr){
+         double f= lavc_venc_context->width*lavc_venc_context->height*255.0*255.0;
+ 
+-        f*= lavc_venc_context->coded_frame->coded_picture_number;
++        f*= lavc_venc_context->frame_num > 0 ? lavc_venc_context->frame_num : 1;
+ 
+         tc_log_info(MOD_NAME, "PSNR: Y:%2.2f, Cb:%2.2f, Cr:%2.2f, All:%2.2f",
+             psnr(lavc_venc_context->error[0]/f),
+--- a/export/aud_aux.c	2026-08-14 23:29:35.280334715 +0200
++++ b/export/aud_aux.c	2026-08-14 23:29:15.833044940 +0200
+@@ -353,7 +353,8 @@
+     mpa_ctx.codec_type  = AVMEDIA_TYPE_AUDIO;
+ #endif
+     mpa_ctx.bit_rate    = vob->mp3bitrate * 1000;  // bitrate dest.
+-    mpa_ctx.channels    = vob->dm_chan;            // channels
++    av_channel_layout_default(&mpa_ctx.ch_layout, vob->dm_chan);
++    mpa_ctx.sample_fmt  = AV_SAMPLE_FMT_S16;
+     mpa_ctx.sample_rate = vob->a_rate;
+ 
+     //-- open codec --
+@@ -368,7 +369,7 @@
+     }
+ 
+     //-- bytes per sample and bytes per frame --
+-    mpa_bytes_ps = mpa_ctx.channels * vob->dm_bits/8;
++    mpa_bytes_ps = mpa_ctx.ch_layout.nb_channels * vob->dm_bits/8;
+     mpa_bytes_pf = mpa_ctx.frame_size * mpa_bytes_ps;
+ 
+     //-- create buffer to hold 1 frame --
+--- a/filter/filter_resample.c	2026-08-14 23:29:35.271372537 +0200
++++ b/filter/filter_resample.c	2026-08-14 23:30:20.145820453 +0200
+@@ -37,7 +37,9 @@
+ #include "libtc/optstr.h"
+ #include "libtc/tcavcodec.h"
+ #include "libtc/tcmodule-plugin.h"
+-#include <libavresample/avresample.h>
++#include <libswresample/swresample.h>
++#include <libavutil/opt.h>
++#include <libavutil/channel_layout.h>
+ 
+ 
+ typedef struct {
+@@ -46,7 +48,7 @@
+ 
+     int bytes_per_sample;
+ 
+-    AVAudioResampleContext *resample_ctx;
++    struct SwrContext *resample_ctx;
+ } ResamplePrivateData;
+ 
+ static const char resample_help[] = ""
+@@ -111,13 +113,22 @@
+         goto abort;
+     }
+ 
+-    pd->resample_ctx = av_audio_resample_init(vob->a_chan, vob->a_chan,
+-                                           vob->mp3frequency, vob->a_rate,
+-                                           AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_S16,
+-                                           16, 10, 0, 0.8);
+-    if (pd->resample_ctx == NULL) {
+-        tc_log_error(MOD_NAME, "can't get a resample context");
+-        goto abort;
++    {
++        AVChannelLayout in_ch, out_ch;
++        av_channel_layout_default(&in_ch, vob->a_chan);
++        av_channel_layout_default(&out_ch, vob->a_chan);
++        if (swr_alloc_set_opts2(&pd->resample_ctx,
++                                &out_ch, AV_SAMPLE_FMT_S16, vob->mp3frequency,
++                                &in_ch, AV_SAMPLE_FMT_S16, vob->a_rate,
++                                0, NULL) < 0
++            || swr_init(pd->resample_ctx) < 0) {
++            av_channel_layout_uninit(&in_ch);
++            av_channel_layout_uninit(&out_ch);
++            tc_log_error(MOD_NAME, "can't get a resample context");
++            goto abort;
++        }
++        av_channel_layout_uninit(&in_ch);
++        av_channel_layout_uninit(&out_ch);
+     }
+ 
+     /* 
+@@ -150,8 +161,7 @@
+     pd = self->userdata;
+ 
+     if (pd->resample_ctx != NULL) {
+-        audio_resample_close(pd->resample_ctx);
+-        pd->resample_ctx = NULL;
++        swr_free(&pd->resample_ctx);
+     }
+     if (pd->resample_buf != NULL) {
+         tc_free(pd->resample_buf);
+@@ -187,10 +197,14 @@
+     if (verbose >= TC_STATS)
+         tc_log_info(MOD_NAME, "inbuf: %i, bufsize: %lu",
+                     frame->audio_size, (unsigned long)pd->resample_bufsize);
+-    frame->audio_size = audio_resample(pd->resample_ctx,
+-                                       (int16_t*)pd->resample_buf,
+-                                       (int16_t*)frame->audio_buf,
+-                                       frame->audio_size/pd->bytes_per_sample);
++    {
++        const uint8_t *in = (const uint8_t *)frame->audio_buf;
++        uint8_t *out = pd->resample_buf;
++        int in_samples = frame->audio_size / pd->bytes_per_sample;
++        int max_out = (int)(pd->resample_bufsize / pd->bytes_per_sample);
++        frame->audio_size = swr_convert(pd->resample_ctx, &out, max_out,
++                                        &in, in_samples);
++    }
+     frame->audio_size *= pd->bytes_per_sample;
+     if (verbose >= TC_STATS)
+         tc_log_info(MOD_NAME, "outbuf: %i", frame->audio_size);
+--- a/filter/Makefile.am	2011-11-19 17:50:27.000000000 +0100
++++ b/filter/Makefile.am	2026-08-14 23:30:20.101819920 +0200
+@@ -207,7 +207,7 @@
+ filter_resample_la_SOURCES = filter_resample.c
+ filter_resample_la_CPPFLAGS = $(AM_CPPFLAGS) $(LIBAVCODEC_CFLAGS)
+ filter_resample_la_LDFLAGS = -module -avoid-version
+-filter_resample_la_LIBADD = $(LIBAVCODEC_LIBS)
++filter_resample_la_LIBADD = $(LIBAVCODEC_LIBS) -lswresample
+ 
+ filter_slowmo_la_SOURCES = filter_slowmo.c
+ filter_slowmo_la_LDFLAGS = -module -avoid-version
+--- a/filter/Makefile.in	2011-11-19 17:50:39.000000000 +0100
++++ b/filter/Makefile.in	2026-08-14 23:30:23.125856483 +0200
+@@ -823,7 +823,7 @@
+ filter_resample_la_SOURCES = filter_resample.c
+ filter_resample_la_CPPFLAGS = $(AM_CPPFLAGS) $(LIBAVCODEC_CFLAGS)
+ filter_resample_la_LDFLAGS = -module -avoid-version
+-filter_resample_la_LIBADD = $(LIBAVCODEC_LIBS)
++filter_resample_la_LIBADD = $(LIBAVCODEC_LIBS) -lswresample
+ filter_slowmo_la_SOURCES = filter_slowmo.c
+ filter_slowmo_la_LDFLAGS = -module -avoid-version
+ filter_smartbob_la_SOURCES = filter_smartbob.c
+--- a/import/v4l/import_v4l2.c	2011-11-19 17:50:27.000000000 +0100
++++ b/import/v4l/import_v4l2.c	2026-08-14 23:30:43.210026951 +0200
+@@ -455,7 +455,7 @@
+         tc_log_warn(MOD_NAME,
+                     "driver does not support cropping"
+                     "(ioctl(VIDIOC_CROPCAP) returns \"%s\"), disabled",
+-                    errno <= sys_nerr ? sys_errlist[errno] : "unknown");
++                    strerror(errno));
+         return TC_ERROR;
+     }
+     if (verbose_flag > TC_INFO) {
+@@ -485,7 +485,7 @@
+         tc_log_warn(MOD_NAME,
+                     "driver does not support inquiring cropping"
+                     " parameters (ioctl(VIDIOC_G_CROP) returns \"%s\")",
+-                    errno <= sys_nerr ? sys_errlist[errno] : "unknown");
++                    strerror(errno));
+         return -1;
+     }
+ 
+@@ -513,7 +513,7 @@
+             tc_log_warn(MOD_NAME,
+                         "driver does not support inquering cropping"
+                         " parameters (ioctl(VIDIOC_G_CROP) returns \"%s\")",
+-                        errno <= sys_nerr ? sys_errlist[errno] : "unknown");
++                        strerror(errno));
+             return -1;
+         }
+         if (verbose_flag > TC_INFO) {
+@@ -613,7 +613,7 @@
+     if (err < 0) {
+         if (verbose_flag) {
+             tc_log_warn(MOD_NAME, "driver does not support setting parameters (ioctl(VIDIOC_S_PARM) returns \"%s\")",
+-                        errno <= sys_nerr ? sys_errlist[errno] : "unknown");
++                        strerror(errno));
+         }
+     }
+     return TC_OK;
+@@ -628,7 +628,7 @@
+     err = ioctl(vs->video_fd, VIDIOC_G_STD, &stdid);
+     if (err < 0) {
+         tc_log_warn(MOD_NAME, "driver does not support get std (ioctl(VIDIOC_G_STD) returns \"%s\")",
+-                    errno <= sys_nerr ? sys_errlist[errno] : "unknown");
++                    strerror(errno));
+         memset(&stdid, 0, sizeof(v4l2_std_id));
+     }
+ 
+--- a/import/v4l/import_v4lcam.c	2011-11-19 17:50:27.000000000 +0100
++++ b/import/v4l/import_v4lcam.c	2026-08-14 23:30:43.210026951 +0200
+@@ -368,7 +368,7 @@
+     if (err < 0) {
+         tc_log_warn(MOD_NAME, "driver does not support setting parameters"
+                               " (ioctl(VIDIOC_S_PARM) returns \"%s\")",
+-                    errno <= sys_nerr ? sys_errlist[errno] : "unknown");
++                    strerror(errno));
+     }
+     return TC_OK;
+ }
+--- a/import/mpg123.h	2011-11-19 17:50:23.000000000 +0100
++++ b/import/mpg123.h	2026-08-14 23:31:25.914343849 +0200
+@@ -36,6 +36,13 @@
+ #include <lame.h>
+ #endif
+ 
++#ifndef lame_decode_init
++int lame_decode_init(void);
++int lame_decode1_headers(unsigned char *mp3buf, int len,
++			 short pcm_l[], short pcm_r[],
++			 mp3data_struct *mp3data);
++#endif
++
+ int lame_decode_initfile(FILE * fd, mp3data_struct * mp3data, int format);
+ int lame_decode_fromfile(FILE * fd, short pcm_l[], short pcm_r[], mp3data_struct * mp3data);
+ 
+--- a/import/import_im.c	2026-08-14 23:29:35.282873425 +0200
++++ b/import/import_im.c	2026-08-14 23:31:25.917272194 +0200
+@@ -289,7 +289,7 @@
+ 
+         MagickSetLastIterator(wand);
+ 
+-        status = MagickGetImagePixels(wand,
++        status = MagickExportImagePixels(wand,
+                                       0, 0, width, height,
+                                       "RGB", CharPixel,
+                                       param->buffer);
+--- a/import/import_imlist.c	2026-08-14 23:29:35.282994726 +0200
++++ b/import/import_imlist.c	2026-08-14 23:31:25.918030503 +0200
+@@ -155,7 +155,7 @@
+ 
+         MagickSetLastIterator(wand);
+ 
+-        status = MagickGetImagePixels(wand,
++        status = MagickExportImagePixels(wand,
+                                       0, 0, width, height,
+                                       "RGB", CharPixel,
+                                       param->buffer);
+--- a/import/extract_ogm.c	2011-11-19 17:50:27.000000000 +0100
++++ b/import/extract_ogm.c	2026-08-14 23:31:48.131636679 +0200
+@@ -66,7 +66,7 @@
+ 
+ stream_t *first;
+ int      nastreams = 0, nvstreams = 0, ntstreams = 0, numstreams = 0;
+-char basename[] = "stdout";
++char ogm_basename[] = "stdout";
+ 
+ static void add_stream(stream_t *ndmx) {
+   stream_t *cur = first;
+@@ -530,16 +530,16 @@
+           stream->serial = sno;
+           ac_memcpy(&stream->instate, &sstate, sizeof(sstate));
+           if (extraction_requested(xtext, ntstreams + 1, NOTEXT)) {
+-            new_name = tc_malloc(strlen(basename) + 20);
++            new_name = tc_malloc(strlen(ogm_basename) + 20);
+             if (!new_name) {
+               tc_log_error(__FILE__, "Failed to allocate %d bytes.",
+-                           (int)strlen(basename) + 20);
++                           (int)strlen(ogm_basename) + 20);
+               exit(1);
+             }
+             if (!xraw)
+-              tc_snprintf(new_name, strlen(basename) + 20, "%s-t%d.srt", basename, ntstreams + 1);
++              tc_snprintf(new_name, strlen(ogm_basename) + 20, "%s-t%d.srt", ogm_basename, ntstreams + 1);
+             else
+-              tc_snprintf(new_name, strlen(basename) + 20, "%s-t%d.raw", basename, ntstreams + 1);
++              tc_snprintf(new_name, strlen(ogm_basename) + 20, "%s-t%d.raw", ogm_basename, ntstreams + 1);
+             //stream->fd = open(new_name, O_WRONLY | O_CREAT | O_TRUNC,
+             //                S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+             stream->fd = fdout;
